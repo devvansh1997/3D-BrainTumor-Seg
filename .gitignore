@@ -1,0 +1,43 @@
+# data — never commit raw NIfTI volumes or archives
+data/raw/
+data/processed/
+*.nii
+*.nii.gz
+*.tar
+*.zip
+*.gz
+
+# results — checkpoints and logs are too large for git
+results/
+
+# python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# envs
+.env
+.venv/
+venv/
+env/
+
+# editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*.DS_Store
+
+# jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# kaggle credentials
+kaggle.json

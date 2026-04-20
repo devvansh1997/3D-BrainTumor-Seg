@@ -1,0 +1,38 @@
+model: swinunetr
+
+data:
+  data_dir: /PATH/TO/BRATS2021/    # <-- update this on HPC before running
+  train_val_test_split: [0.70, 0.15, 0.15]
+
+training:
+  patch_size: [128, 128, 128]
+  batch_size: 2
+  max_epochs: 300
+  val_interval: 5
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  cache_rate: 1.0
+  num_workers: 8
+  sw_batch_size: 4
+
+model_params:
+  in_channels: 4
+  out_channels: 4
+  feature_size: 48
+  use_checkpoint: true
+
+output:
+  checkpoint_dir: results/checkpoints
+  log_dir: results/logs/swinunetr
+
+debug:
+  enabled: false
+  num_samples: 4
+  max_epochs: 3
+  patch_size: [64, 64, 64]
+  batch_size: 1
+  val_interval: 1
+  cache_rate: 0.0
+  num_workers: 0
+  sw_batch_size: 1
+  feature_size: 24

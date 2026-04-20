@@ -35,18 +35,21 @@ def train(config: dict, eval_only: bool = False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}  |  Model: {config['model']}  |  Debug: {config['debug']['enabled']}")
 
-    patch_size  = config["training"]["patch_size"]
-    max_epochs  = config["training"]["max_epochs"]
+    patch_size   = config["training"]["patch_size"]
+    max_epochs   = config["training"]["max_epochs"]
     val_interval = config["training"]["val_interval"]
-    sw_bs       = config["training"].get("sw_batch_size", 2)
-    n_cls       = config["model_params"]["out_channels"]
-    ckpt_dir    = config["output"]["checkpoint_dir"]
-    log_dir     = config["output"]["log_dir"]
-    model_tag   = config["model"]
+    sw_bs        = config["training"].get("sw_batch_size", 2)
+    n_cls        = config["model_params"]["out_channels"]
+    ckpt_dir     = config["output"]["checkpoint_dir"]
+    log_dir      = config["output"]["log_dir"]
+    model_tag    = config["model"]
+    data_format  = config["data"].get("data_format", "brats2021")
 
     # Data
     train_loader, val_loader, test_loader = get_dataloaders(
-        config, get_train_transforms(patch_size), get_val_transforms()
+        config,
+        get_train_transforms(patch_size, data_format),
+        get_val_transforms(data_format),
     )
 
     # Model

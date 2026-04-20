@@ -2,6 +2,7 @@ model: swinunetr
 
 data:
   data_dir: data/raw
+  data_format: brats2021
   train_val_test_split: [0.70, 0.15, 0.15]
 
 training:

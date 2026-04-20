@@ -1,7 +1,8 @@
 model: swinunetr
 
 data:
-  data_dir: /PATH/TO/BRATS2021/    # <-- update this on HPC before running
+  data_dir: /lustre/fs1/home/de807845/med_img_computing/datasets/Brats/Task01_BrainTumour/
+  data_format: msd
   train_val_test_split: [0.70, 0.15, 0.15]
 
 training:

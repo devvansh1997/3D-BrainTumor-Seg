@@ -63,7 +63,7 @@ def train(config: dict, eval_only: bool = False):
         evaluate(model, test_loader, device, config, split="test")
         return
 
-    loss_fn   = get_loss_fn()
+    loss_fn   = get_loss_fn(config)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config["training"]["learning_rate"],

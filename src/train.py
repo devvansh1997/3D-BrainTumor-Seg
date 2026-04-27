@@ -78,6 +78,11 @@ def train(config: dict, eval_only: bool = False):
     writer = SummaryWriter(log_dir=log_dir)
     best_dice = 0.0
 
+    # HausdorffDTLoss is expensive: only apply every N steps to keep training feasible
+    boundary_loss_freq = config["training"].get("boundary_loss_freq", 1)
+    dice_ce_only = get_loss_fn()   # plain DiceCE fallback for non-boundary steps
+    global_step = 0
+
     for epoch in range(max_epochs):
         model.train()
         epoch_loss = 0.0
@@ -89,10 +94,13 @@ def train(config: dict, eval_only: bool = False):
 
             optimizer.zero_grad()
             outputs = model(inputs)
-            loss = compute_loss(loss_fn, outputs, labels)
+            # Apply boundary loss only every `boundary_loss_freq` steps
+            active_loss = loss_fn if (global_step % boundary_loss_freq == 0) else dice_ce_only
+            loss = compute_loss(active_loss, outputs, labels)
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
+            global_step += 1
 
         scheduler.step()
         epoch_loss /= len(train_loader)

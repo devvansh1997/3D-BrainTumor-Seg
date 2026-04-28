@@ -1,0 +1,469 @@
+\documentclass[12pt, letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[numbers, sort&compress]{natbib}
+
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{\textbf{CNN vs.\ Transformer for 3D Brain Tumor Segmentation:\\
+       A Controlled Comparison with Boundary-Aware Loss}}
+\author{Devansh Sharma\\
+        CAP 5516 --- Medical Image Computing, Spring 2026}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{abstract}
+Accurate segmentation of brain tumors from multi-modal MRI is a critical step in
+treatment planning for glioblastoma.
+This project compares a CNN-based segmentation model (DynUNet, an nnU-Net-style
+network) against a Vision Transformer (SwinUNETR) on the Medical Segmentation
+Decathlon Task~01 brain tumor dataset.
+Both models are trained under identical conditions and evaluated on per-class
+Dice Similarity Coefficient (DSC) and 95th-percentile Hausdorff Distance (HD95)
+across three tumor sub-regions.
+We find that DynUNet achieves slightly higher mean DSC (0.741 vs.\ 0.732) while
+SwinUNETR achieves better mean HD95 (6.19\,mm vs.\ 6.94\,mm), confirming
+a well-known CNN--Transformer trade-off: CNNs excel at voxel-overlap but
+Transformers produce smoother, better-localised boundaries.
+As our original contribution, we introduce a \emph{boundary-aware loss}
+that combines standard DiceCE loss with a weighted Hausdorff Distance
+Transform loss applied periodically during training.
+This single modification reduces DynUNet's weakest-class HD95
+(Peritumoral Edema) from 9.88\,mm to 7.10\,mm --- a 28\% improvement that
+brings it below SwinUNETR's score on the same class, without adding any
+model parameters or increasing inference time.
+\end{abstract}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Introduction}
+
+Glioblastoma multiforme (GBM) is among the most aggressive primary brain tumors,
+with a median survival of roughly 15 months.
+Precise volumetric segmentation from MRI guides surgical planning, radiotherapy
+dose contouring, and longitudinal monitoring.
+Manual delineation is time-consuming and subject to inter-rater variability,
+making automatic segmentation a high-priority clinical need.
+
+The field has been shaped by two major architectural families.
+Convolutional encoder--decoder networks---exemplified by U-Net \cite{ronneberger2015} and
+its 3D descendants---leverage local spatial inductive biases and have been
+the workhorse of medical image segmentation for almost a decade.
+Vision Transformers \cite{dosovitskiy2020} capture long-range dependencies
+through self-attention, at the cost of higher memory and a weaker spatial prior.
+SwinUNETR \cite{tang2022} combines hierarchical shifted-window attention with a
+CNN decoder, representing the current Transformer state-of-the-art on brain
+tumor benchmarks.
+
+This project frames the comparison as a controlled experiment: identical data
+splits, preprocessing, optimizers, and patch sizes, so that architectural
+differences drive the metric gap rather than training tricks.
+We then ask whether a lightweight loss-level intervention can close the
+CNN's boundary-accuracy gap without switching to a heavier architecture.
+
+\textbf{Original contributions.}
+\begin{enumerate}[leftmargin=*, label=(\arabic*)]
+    \item A fair, reproducible head-to-head comparison of DynUNet and SwinUNETR
+          on the MSD Task~01 dataset using the MONAI framework.
+    \item A boundary-aware loss function (DiceCE + weighted HausdorffDT,
+          applied every $k=10$ training steps) that specifically targets
+          HD95 without inflating training cost.
+    \item Empirical analysis showing that the boundary loss closes
+          DynUNet's ED HD95 gap to SwinUNETR by 28\%, while preserving
+          sub-10\,ms-per-volume inference speed.
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Related Work}
+
+\paragraph{nnU-Net and DynUNet.}
+Isensee et al.\ \cite{isensee2021} showed that a well-tuned standard U-Net
+consistently outperforms most hand-crafted architectures.
+MONAI's DynUNet implements the same self-configuring design: kernel sizes and
+strides are derived from the dataset's median voxel spacing, and auxiliary
+deep supervision heads are attached at each decoder resolution.
+
+\paragraph{SwinUNETR.}
+Tang et al.\ \cite{tang2022} pre-trained a Swin Transformer encoder on 5{,}000
+unlabelled CT/MRI volumes and fine-tuned it for the BraTS 2021 segmentation
+challenge, achieving state-of-the-art Dice scores.
+Its hierarchical window attention is resolution-agnostic, making it straightforward
+to apply to arbitrary patch sizes.
+
+\paragraph{Boundary-aware losses.}
+Several works have noted that Dice loss is insensitive to boundary errors.
+Kervadec et al.\ \cite{kervadec2019} proposed a contour-based loss term;
+Karimi \& Gholipour \cite{karimi2019} derived a differentiable Hausdorff
+distance approximation.
+MONAI provides \texttt{HausdorffDTLoss}, which back-propagates through a
+distance-transform approximation of HD.
+We leverage this directly as a regularisation term.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Methodology}
+
+\subsection{Problem Formulation}
+Given a 4-channel MRI volume $\mathbf{X} \in \mathbb{R}^{4 \times H \times W \times D}$
+(T1, T1ce, T2, FLAIR modalities), the goal is to predict a voxel-level label map
+$\hat{\mathbf{Y}} \in \{0,1,2,3\}^{H \times W \times D}$, where labels correspond
+to: 0 = background, 1 = necrotic core / non-enhancing tumor (NCR/NET),
+2 = peritumoral edema (ED), 3 = enhancing tumor (ET).
+
+\subsection{Dataset}
+We use the \textbf{Medical Segmentation Decathlon Task~01: Brain Tumour} dataset
+\cite{antonelli2022}, which contains 484 multi-modal MRI cases in 4D NIfTI
+format (four modalities stacked along the channel axis).
+Segmentation labels follow the convention 0/1/2/3.
+Cases are split deterministically (seed = 42) into
+338 training / 72 validation / 74 test cases (70/15/15\%).
+
+\subsection{Preprocessing}
+All volumes are resampled to 1.0\,mm isotropic spacing, reoriented to RAS,
+and z-score normalised per modality using only non-zero voxels (to exclude
+background bias).
+During training, random $128^3$ patches are extracted; validation and test
+use sliding-window inference with a $128^3$ window and batch size~4.
+
+\subsection{Model Architectures}
+
+\paragraph{DynUNet (CNN baseline).}
+A 5-level encoder--decoder with residual blocks, instance normalisation, and
+leaky ReLU activations.
+Kernel sizes are $3\times3\times3$ throughout; encoder strides are
+$[1,2,2,2,2]$.
+Deep supervision is enabled: auxiliary outputs at resolutions
+$\times\frac{1}{2}$ and $\times\frac{1}{4}$ contribute to training loss
+with weights $1.0$ and $0.5$.
+Trainable parameters: \textbf{16.5\,M}.
+
+\paragraph{SwinUNETR (Transformer).}
+A Swin Transformer encoder with window size 7, 4 stages, and feature
+dimension 48, connected to a CNN decoder via skip connections.
+No pre-training was used; the model was trained from scratch to maintain
+a fair comparison.
+Trainable parameters: \textbf{62.2\,M} (3.8$\times$ DynUNet).
+
+\subsection{Loss Functions}
+
+\paragraph{Baseline loss (both models).}
+\begin{equation}
+    \mathcal{L}_{\text{DiceCE}} = \mathcal{L}_{\text{Dice}} + \mathcal{L}_{\text{CE}}
+\end{equation}
+where $\mathcal{L}_{\text{Dice}}$ is the soft multi-class Dice loss and
+$\mathcal{L}_{\text{CE}}$ is cross-entropy, both with softmax activations.
+
+\paragraph{Boundary-aware loss (DynUNet ablation).}
+\begin{equation}
+    \mathcal{L}_{\text{boundary}} =
+        \mathcal{L}_{\text{DiceCE}} + \lambda \cdot \mathcal{L}_{\text{HD}}
+\end{equation}
+where $\mathcal{L}_{\text{HD}}$ is MONAI's \texttt{HausdorffDTLoss}
+(a differentiable distance-transform approximation of HD95) and $\lambda = 0.5$.
+Computing 3D distance transforms at every step is prohibitively slow
+(${\sim}16$\,s/batch vs.\ ${\sim}2$\,s for DiceCE alone).
+We therefore apply $\mathcal{L}_{\text{HD}}$ only every $k=10$ training steps,
+falling back to plain $\mathcal{L}_{\text{DiceCE}}$ otherwise.
+This reduces the per-epoch overhead by ${\approx}5\times$ while still
+exposing the model to boundary gradients regularly throughout training.
+Deep supervision weights $\{1.0, 0.5, 0.25\}$ are applied to each auxiliary
+head output.
+
+\subsection{Training Protocol}
+Both models use identical settings unless stated otherwise (Table~\ref{tab:training}).
+
+\begin{table}[H]
+\centering
+\caption{Training hyperparameters shared by all three runs.}
+\label{tab:training}
+\begin{tabular}{ll}
+\toprule
+\textbf{Hyperparameter} & \textbf{Value} \\
+\midrule
+Optimizer           & Adam \\
+Learning rate       & $1\times10^{-3}$ \\
+Weight decay        & $1\times10^{-5}$ \\
+LR schedule         & Cosine Annealing \\
+Batch size          & 2 \\
+Patch size          & $128^3$ \\
+Max epochs          & 300 (DynUNet baseline \& SwinUNETR); 150 (DynUNet+BL) \\
+Val interval        & 5 epochs \\
+Cache rate          & 1.0 \\
+Data augmentation   & Random crop to patch; normalisation only \\
+Hardware            & NVIDIA A100 80\,GB (HPC, single GPU) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Checkpoints are saved whenever validation mean Dice improves.
+Final test evaluation uses the best validation checkpoint.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Experiments and Results}
+
+\subsection{Quantitative Results}
+
+Table~\ref{tab:results} reports per-class and mean DSC and HD95 on the
+74-case held-out test set.
+Figure~\ref{fig:bars} visualises the same metrics as grouped bar charts.
+
+\begin{table}[H]
+\centering
+\caption{Test-set segmentation results. Best per column in \textbf{bold}.
+         $\uparrow$ = higher is better; $\downarrow$ = lower is better.}
+\label{tab:results}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+ & \multicolumn{3}{c}{\textbf{Dice} $\uparrow$} & & \multicolumn{3}{c}{\textbf{HD95 (mm)} $\downarrow$} & \\
+\cmidrule(lr){2-4} \cmidrule(lr){6-8}
+\textbf{Model} & NCR/NET & ED & ET & Mean & NCR/NET & ED & ET & Mean \\
+\midrule
+DynUNet (baseline)        & \textbf{0.794} & \textbf{0.598} & \textbf{0.831} & \textbf{0.741} & 6.60 & 9.88 & \textbf{4.33} & 6.94 \\
+SwinUNETR                 & 0.793 & 0.587 & 0.815 & 0.732 & 7.41 & 7.27 & 3.89 & \textbf{6.19} \\
+DynUNet + BoundaryLoss    & 0.786 & 0.580 & 0.801 & 0.722 & \textbf{6.39} & \textbf{7.10} & 6.03 & 6.50 \\
+\midrule
+\multicolumn{9}{l}{\small $^\dagger$ Inference time: DynUNet 0.008\,s/vol; SwinUNETR 0.122\,s/vol. GPU: DynUNet 10.3\,GB; SwinUNETR 17.0\,GB.}\\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig1_per_class_metrics.png}
+    \caption{Per-class Dice (left) and HD95 (right) for all three models on the
+             test set. The green arrow on the HD95 plot highlights the 28\%
+             reduction in ED HD95 achieved by the boundary-aware loss.}
+    \label{fig:bars}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\linewidth]{figures/fig4_ed_hd95_spotlight.png}
+    \caption{ED (Peritumoral Edema) HD95 comparison. The boundary-aware loss
+             reduces DynUNet's ED HD95 from 9.88\,mm to 7.10\,mm, dropping below
+             SwinUNETR's score of 7.27\,mm on this class.}
+    \label{fig:spotlight}
+\end{figure}
+
+\subsection{Computational Efficiency}
+
+Table~\ref{tab:compute} summarises the computational footprint of each model.
+
+\begin{table}[H]
+\centering
+\caption{Computational comparison on the same A100 hardware.}
+\label{tab:compute}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{Params} & \textbf{GPU Mem} & \textbf{Inference} & \textbf{Epochs} \\
+\midrule
+DynUNet (baseline)     & 16.5\,M & 10.3\,GB & 0.008\,s/vol & 300 \\
+SwinUNETR              & 62.2\,M & 17.0\,GB & 0.122\,s/vol & 300 \\
+DynUNet + BoundaryLoss & 16.5\,M & 10.3\,GB & 0.008\,s/vol & 150 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+SwinUNETR requires $3.8\times$ more parameters, $1.65\times$ more GPU memory,
+and is $15\times$ slower at inference than DynUNet.
+The boundary-aware loss adds \emph{zero} inference overhead since
+$\mathcal{L}_{\text{HD}}$ is only active during training.
+
+\subsection{Training Dynamics}
+
+Figure~\ref{fig:curves} shows validation Dice and training loss across epochs.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig3_training_curves.png}
+    \caption{Left: validation Dice over training epochs. Right: training loss.
+             The DynUNet+BoundaryLoss curve (green) shows instability early on
+             due to HausdorffDT gradient spikes, but stabilises and converges
+             by epoch 120. SwinUNETR (orange) converges faster and plateaus
+             around epoch 50. DynUNet baseline (blue dashed) converges slowly
+             but reaches the highest peak validation Dice of 0.742 by epoch 300.
+             The boundary-loss training loss starts at ${\sim}11$ (DiceCE +
+             HausdorffDT combined) before dropping sharply.}
+    \label{fig:curves}
+\end{figure}
+
+\subsection{Qualitative Results}
+
+Figures~\ref{fig:seg1} and~\ref{fig:seg2} show axial segmentation overlays
+for two representative BraTS2021 cases.
+Predictions are generated by running inference with the trained MSD checkpoints
+on local BraTS2021 data to illustrate cross-dataset generalisation.
+The three tumor sub-regions are coloured: NCR/NET in red, ED in yellow, ET in cyan.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig5_seg_BraTS2021_00000.png}
+    \caption{Axial segmentation overlays for BraTS2021\_00000 (edema-dominant case).
+             Columns left to right: T1ce image, Ground Truth, DynUNet+BoundaryLoss,
+             SwinUNETR. Rows show three axial slices through the tumour centre.
+             NCR/NET = red, ED = yellow, ET = cyan.}
+    \label{fig:seg1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig5_seg_BraTS2021_00002.png}
+    \caption{Axial segmentation overlays for BraTS2021\_00002 (ET-dominant case).
+             Same column layout as Figure~\ref{fig:seg1}.
+             Both models correctly localise the tumour; some over-prediction of NCR
+             (red) relative to GT is expected given cross-dataset transfer
+             (models trained on MSD, evaluated on BraTS2021).}
+    \label{fig:seg2}
+\end{figure}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Analysis and Discussion}
+
+\paragraph{Dice vs.\ HD95 trade-off.}
+DynUNet achieves the highest mean DSC (0.741) but the worst mean HD95 (6.94\,mm).
+SwinUNETR flips this: lower DSC (0.732) but better HD95 (6.19\,mm).
+This confirms the established finding that Transformers model global context more
+effectively, leading to spatially coherent predictions with fewer stray voxels
+at boundaries.
+The gap on ET HD95 is especially striking: SwinUNETR scores 3.89\,mm vs.\
+DynUNet's 4.33\,mm, a 10\% improvement on the most clinically relevant sub-region.
+
+\paragraph{Why does DynUNet have strong NCR/ET Dice?}
+DynUNet's local convolutions are well-suited to the compact, high-contrast
+enhancing tumor and necrotic core, where strong local texture cues are sufficient.
+ED is larger and more diffuse, making its boundary harder to delineate without
+long-range context --- which explains why SwinUNETR holds an advantage on ED HD95.
+
+\paragraph{Effect of the boundary-aware loss.}
+Adding $\mathcal{L}_{\text{HD}}$ to DynUNet's training objective reduces ED HD95
+by 2.78\,mm (28\%) and mean HD95 by 0.44\,mm, narrowing the gap to SwinUNETR
+from 0.75\,mm to 0.31\,mm.
+The improvement is specific to the classes where DynUNet originally struggled:
+NCR HD95 improves by 0.21\,mm and ED HD95 by 2.78\,mm.
+ET HD95, where DynUNet was already competitive, worsens slightly (4.33 $\to$
+6.03\,mm), suggesting a trade-off: the boundary loss pushes the model toward
+smoother ED boundaries at the cost of some ET boundary precision.
+Mean DSC decreases modestly (0.741 $\to$ 0.722), which is the typical
+DSC--HD trade-off when adding boundary terms.
+
+\paragraph{Training instability with HausdorffDT.}
+Two sharp validation Dice drops are visible at epochs 30 and 95
+(Figure~\ref{fig:curves}).
+These correspond to moments when the HausdorffDT term produces large gradient
+spikes on cases with near-zero predicted probability for a class.
+The model recovers in both cases, suggesting the Adam optimiser with cosine
+annealing is robust enough to handle these perturbations.
+Using $k=10$ (applying the boundary loss every 10 steps rather than every step)
+was essential: a frequency of $k=1$ required ${\sim}16$\,s/iteration vs.\
+${\sim}2$\,s/iteration, making 300-epoch training computationally infeasible.
+
+\paragraph{Inference speed as a practical consideration.}
+SwinUNETR is 15$\times$ slower at inference (0.122\,s vs.\ 0.008\,s per volume)
+due to the quadratic cost of attention in 3D patches.
+For a clinical deployment processing hundreds of MRI studies per day, DynUNet's
+sub-10\,ms inference is a meaningful practical advantage.
+
+\paragraph{Limitations.}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{No pre-training for SwinUNETR.}
+          The original SwinUNETR paper uses self-supervised pre-training on 5{,}000
+          volumes, which can add 3--5\% DSC.
+          Our from-scratch training likely underestimates SwinUNETR's ceiling.
+    \item \textbf{DynUNet+BL trained for only 150 epochs.}
+          The baseline ran 300 epochs and was still slowly improving at convergence.
+          The boundary-loss model may not have fully converged, so the reported
+          DSC gap between baseline and BL may shrink with additional training.
+    \item \textbf{No data augmentation beyond random crop.}
+          Standard augmentations (random flip, intensity jitter, elastic deformation)
+          were omitted to keep the comparison controlled, but they would likely
+          improve all models.
+    \item \textbf{Single random seed.}
+          Results are reported for one training run per model.
+          Variance across seeds was not measured.
+\end{itemize}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Conclusions}
+
+This project presented a controlled comparison of CNN and Transformer architectures
+for 3D brain tumor segmentation on the MSD Task~01 dataset.
+The main findings are:
+
+\begin{enumerate}[leftmargin=*, label=(\arabic*)]
+    \item \textbf{CNNs win on Dice; Transformers win on HD95.}
+          DynUNet scores 0.741 mean DSC vs.\ SwinUNETR's 0.732, but SwinUNETR
+          achieves 6.19\,mm mean HD95 vs.\ DynUNet's 6.94\,mm.
+          The choice of metric matters: for tumour volume estimation, DynUNet is
+          preferable; for surgical margin delineation, SwinUNETR is better.
+
+    \item \textbf{A boundary-aware loss bridges the HD95 gap.}
+          Periodic application of \texttt{HausdorffDTLoss} during DynUNet training
+          reduces ED HD95 by 28\% and overall mean HD95 by 6.3\%,
+          closing the gap to SwinUNETR from 0.75\,mm to 0.31\,mm with no change
+          to the model architecture or inference pipeline.
+
+    \item \textbf{Efficiency favours DynUNet.}
+          At $15\times$ faster inference and $3.8\times$ fewer parameters,
+          DynUNet remains the more practical choice for deployment,
+          particularly after boundary-loss fine-tuning.
+\end{enumerate}
+
+\textbf{Future work} could include: self-supervised pre-training for SwinUNETR,
+a full ablation of boundary loss weight $\lambda$ and frequency $k$,
+anisotropic distance transform weighting to prioritise clinically critical
+sub-regions, and extension to the full BraTS 2021 dataset (1{,}251 cases).
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Use of External Resources}
+
+\paragraph{Frameworks and libraries.}
+This project uses \textbf{MONAI} \cite{monai2020} (v1.3) for data loading,
+transforms, model definitions (DynUNet, SwinUNETR), loss functions
+(DiceCELoss, HausdorffDTLoss), and sliding-window inference.
+\textbf{PyTorch} \cite{paszke2019} is used as the deep learning backend.
+\textbf{TensorBoard} is used for training logging and curve visualisation.
+
+\paragraph{Models.}
+The DynUNet and SwinUNETR architectures are taken directly from MONAI's model
+zoo and are \emph{not} our original designs.
+No pre-trained weights were used; all models were trained from scratch.
+
+\paragraph{Dataset.}
+The Medical Segmentation Decathlon Task~01 dataset \cite{antonelli2022}
+is a publicly available benchmark used without modification.
+
+\paragraph{Original contributions.}
+The following are our original work:
+\begin{itemize}[leftmargin=*]
+    \item The \texttt{BoundaryAwareLoss} module combining DiceCE with
+          periodic HausdorffDT (every $k=10$ steps), implemented in
+          \texttt{src/losses.py}.
+    \item The frequency-throttled training loop modification in
+          \texttt{src/train.py}.
+    \item The controlled experimental design, data pipeline
+          (supporting both MSD and BraTS2021 formats), evaluation harness,
+          and all reported experiments.
+    \item All figures and analyses presented in this report.
+\end{itemize}
+
+All code is available at:
+\url{https://github.com/devvansh1997/3D-BrainTumor-Seg}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

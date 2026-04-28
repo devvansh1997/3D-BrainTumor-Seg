@@ -136,6 +136,12 @@ def main():
     data_format  = cfg["data"].get("data_format", "msd")
     print(f"Device: {device}  |  data_format: {data_format}  |  patch: {patch_size}")
 
+    # Disable caching — we only need a few cases, not the full 484-volume cache.
+    # With cache_rate=1.0 the loader spends 30+ min preprocessing on CPU before
+    # the first batch even appears, which makes it look like "everything is on CPU".
+    cfg["training"]["cache_rate"]  = 0.0
+    cfg["training"]["num_workers"] = 0
+
     # Use the same split as training (seed=42 deterministic)
     _, _, test_loader = get_dataloaders(
         cfg,
